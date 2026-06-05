@@ -1,0 +1,119 @@
+PR Monitoring & Crisis Alert — n8n Workflow
+Builder: Rodrigo Espinosa Quinteros
+Type: n8n Automation Workflow
+Status: Productized — sold and deployed across multiple clients with per-client adjustments
+Trigger: Scheduled (every hour)
+Domain: Public Relations, Brand Monitoring, Crisis Management
+
+Overview
+An automated PR monitoring pipeline that scans RSS news feeds hourly, uses AI to
+assess sentiment and reputational risk for each mention, and routes high-risk items
+to both a real-time Telegram alert and a CRM note in Odoo — all without human
+intervention unless a crisis threshold is met.
+The core value: a PR team is notified only when something actually requires their
+attention. Low and medium risk mentions are logged silently; only high-risk mentions
+trigger an alert. This eliminates the noise of manual monitoring while ensuring nothing
+critical slips through.
+
+Flow Architecture
+[Cron Trigger - Every Hour]
+        ↓
+[RSS Feed Read]
+        ↓
+[Function - Normalize]
+        ↓
+[OpenAI - Sentiment & Risk Analysis]
+        ↓
+[IF: Risk = "alto" (high)?]
+        ↓                    ↓
+[Telegram Alert]     [Odoo - Create Note]
+Total nodes: 7
+Execution timeout: 60 minutes
+Credentials required: OpenAI API, Telegram Bot, Odoo API
+Environment variables: RSS_FEED_URL, TELEGRAM_CHAT_ID
+
+Node Breakdown
+1. Cron Trigger
+Fires every hour on a fixed schedule. No external event required — the workflow
+is self-initiating. This ensures continuous monitoring without relying on webhooks
+or manual execution.
+2. RSS Feed Read
+Fetches the RSS feed defined in the RSS_FEED_URL environment variable. Using an
+environment variable (rather than hardcoding the URL) makes this workflow portable
+across clients — each deployment points to a different feed without touching the
+workflow logic.
+3. Function — Normalize
+Standardizes the RSS output into a consistent data structure:
+json{ "title": "", "content": "", "url": "", "source": "RSS" }
+This normalization step is critical for downstream reliability. RSS feeds vary
+significantly in structure across sources; normalizing before the AI step ensures
+the prompt always receives clean, consistent input.
+4. OpenAI — Sentiment & Risk Analysis
+Sends each normalized item to GPT-4o-mini with a focused system prompt:
+
+"Analyze brand mentions for PR. Return ONLY JSON with: {sentimiento, riesgo, resumen}."
+
+Key design decisions:
+
+JSON response format enforced — the node uses responseFormat: json, ensuring
+the output is always machine-parseable for the downstream IF condition
+GPT-4o-mini over GPT-4o — sufficient for classification tasks, significantly
+lower cost per execution, important for a workflow that runs 24 times per day
+Three-field output only — sentiment, risk level, and summary. No extraneous
+data that would require additional parsing
+
+5. IF — Risk Filter
+Routes items based on the riesgo field returned by OpenAI:
+
+riesgo = "alto" → triggers both output branches
+Anything else → workflow ends silently (item is logged but no alert sent)
+
+This is the core triage logic. The IF node acts as a noise filter — the PR team
+only receives notifications for items the AI has classified as high risk.
+6. Telegram Alert (High Risk Branch)
+Sends an immediate push notification to a configured Telegram chat:
+🚨 Alerta PR | Riesgo ALTO
+[AI-generated summary]
+Telegram was chosen over email for its push notification behavior and near-zero
+latency — critical for crisis scenarios where response time matters.
+7. Odoo — Create Note (Parallel Branch)
+Simultaneously creates a note in Odoo CRM with the AI-generated summary. This
+ensures every high-risk mention is documented in the client's existing system of
+record, regardless of whether the Telegram alert is seen or acted upon.
+Key design decision: Both branches run in parallel, not sequentially. The CRM
+record is created whether or not the Telegram message is delivered — decoupling
+the alert from the audit trail.
+
+Per-Client Customization Points
+This workflow has been sold and adapted multiple times. Common adjustments per
+deployment:
+
+RSS feed URL — swapped via environment variable, no workflow editing required
+Risk classification language — some clients use English (high/medium/low),
+others Spanish (alto/medio/bajo); the IF condition and system prompt are adjusted
+accordingly
+Alert destination — Telegram is the default; some clients prefer WhatsApp
+(via Twilio), Slack, or email
+CRM integration — Odoo is the default; replaceable with HubSpot, Notion, or
+Google Sheets depending on client stack
+Monitoring frequency — hourly is standard; high-profile clients during campaigns
+or events may run every 15–30 minutes
+
+
+Key Takeaways
+
+Environment variables for portability — externalizing client-specific values
+(RSS_FEED_URL, TELEGRAM_CHAT_ID) makes a single workflow template deployable
+across multiple clients with zero structural changes.
+Normalize before AI — always standardize data structure before sending to an
+LLM. Inconsistent input produces inconsistent output; a normalization function node
+is cheap insurance.
+Enforce JSON output from OpenAI — for workflows where AI output feeds into
+conditional logic, use responseFormat: json and define the exact fields in the
+system prompt. This eliminates parsing errors and makes the IF condition reliable.
+Model cost vs. capability matching — GPT-4o-mini is the right choice for
+classification tasks running at high frequency. Reserving GPT-4o for tasks that
+genuinely require it keeps operational costs sustainable.
+Parallel output branches — separating the alert (Telegram) from the audit trail
+(Odoo) into parallel branches ensures documentation is never dependent on
+notification delivery. Both always run independently.
