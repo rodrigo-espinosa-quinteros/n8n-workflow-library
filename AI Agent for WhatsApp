@@ -1,0 +1,160 @@
+AI Agent for WhatsApp — n8n Workflow
+Builder: Rodrigo Espinosa Quinteros
+Type: n8n Agentic Workflow
+Status: Active production deployment
+Trigger: Event-driven (WhatsApp webhook)
+Domain: Conversational AI, Coaching Sales, CRM Automation
+
+Overview
+A fully agentic WhatsApp assistant that handles inbound conversations end-to-end:
+detects user intent, retrieves relevant coaching content from a Google Sheet knowledge
+base, generates personalized responses, and logs every interaction to a CRM — all
+in real time, without human intervention.
+Unlike the scheduled PR monitoring workflow, this system is reactive and stateful.
+It responds to live user messages, remembers the last 15 turns of each conversation,
+and makes tool-calling decisions dynamically based on what the user says.
+The agent is designed to feel like a human advisor — it uses the user's name, speaks
+informally, never identifies itself as AI, and closes every qualified conversation with
+a Calendly booking link.
+
+Flow Architecture
+[WhatsApp Trigger - Webhook]
+          ↓
+    [AI Agent]
+    ├── [OpenAI GPT-4.1-mini] (language model)
+    ├── [Simple Memory] (15-turn conversation window per user)
+    └── [Coaching & Bienestar Tool] (Google Sheets knowledge base)
+          ↓
+[Send WhatsApp Message]
+          ↓
+[CRM - Google Sheets Append]
+Total nodes: 7
+Trigger type: Event-driven (webhook)
+Active: Yes — live production deployment
+Integrations: WhatsApp Business API, OpenAI, Google Sheets (×2), n8n Memory Buffer
+
+Node Breakdown
+1. WhatsApp Trigger
+Listens for inbound WhatsApp messages via webhook. Fires on every new message received
+by the connected WhatsApp Business account. Passes the full message payload —
+including the sender's phone number, display name, and message body — to the agent.
+Key design decision: The phone number (wa_id) is used as the session key for
+memory, ensuring each user has their own isolated conversation context. Two users
+messaging simultaneously never share or contaminate each other's session.
+
+2. AI Agent (Core Orchestrator)
+The central node. An n8n LangChain agent that:
+
+Receives the incoming message and user name from the trigger payload
+Detects intent and decides whether to show a menu or process a topic selection
+Calls the CoachingInfo tool when a topic is identified
+Composes and returns a response
+
+Agent system prompt architecture:
+The prompt encodes four behavioral layers:
+Layer 1 — Persona rules
+
+Respond as a human advisor, not a bot
+Use informal "tú" address
+No signatures, bullet lists in replies, or code blocks
+Default response length: 1–2 sentences + one question or action
+
+Layer 2 — Intent detection logic
+Two trigger conditions are defined:
+
+Menu trigger: greetings, vague messages ("I want to improve"), or requests for
+options → show the coaching invitation menu once and wait
+Selection trigger: any message containing a topic keyword or synonym → treat as
+a choice
+
+Layer 3 — Topic normalization
+All user inputs are normalized to one of five exact labels before tool-calling:
+
+Enfoque y productividad
+Balance de roles y prioridades
+Influencia y marca personal
+Seguridad psicológica y confianza en equipos
+Bienestar integral (sueño, relaciones, propósito, ejercicio)
+
+This normalization step is critical — it ensures the tool query always uses a
+standardized key, regardless of how the user phrased their choice ("I want better
+sleep" → "Bienestar integral...").
+Layer 4 — Fallback behavior
+If the tool returns no data, the agent generates a plausible 1-example response from
+its own training knowledge, then closes with the standard booking CTA. This prevents
+silent failures from surfacing as empty or broken responses.
+
+3. OpenAI Chat Model (GPT-4.1-mini)
+The language model powering the agent. GPT-4.1-mini was selected over GPT-4o for
+cost efficiency in a high-frequency conversational context — this workflow fires on
+every inbound WhatsApp message, so model cost per execution matters significantly
+at scale.
+
+4. Simple Memory (Conversation Buffer)
+Maintains a sliding window of the last 15 messages per user, keyed by WhatsApp phone
+number. This enables the agent to:
+
+Remember which topic the user selected earlier in the conversation
+Avoid re-showing the menu to users who already chose
+Reference previous context in follow-up responses
+
+Key design decision: 15-message window balances context depth with token cost.
+Enough to maintain coherent multi-turn conversations; short enough to avoid excessive
+context window usage on long conversations.
+
+5. Coaching & Bienestar (Google Sheets Tool)
+A Google Sheets document connected as an AI tool — the agent calls it like a function,
+passing a normalized topic label and receiving structured coaching content in return.
+Key design decision: Using Google Sheets as the knowledge base (rather than
+embedding content in the prompt) has three advantages:
+
+The client can update coaching content without touching the workflow
+The prompt stays lean and focused on behavior, not content
+Content can be version-controlled and audited independently of the workflow
+
+
+6. Send WhatsApp Message
+Sends the agent's output back to the original sender via WhatsApp Business API,
+using the wa_id from the trigger to route the reply correctly.
+
+7. CRM — Google Sheets Append
+After every successful reply, appends a row to a separate CRM Google Sheet with:
+
+Date and time
+Contact name
+Phone number
+Email (if available)
+Message content
+
+This creates a persistent lead log that the client can use for follow-up, reporting,
+and conversion tracking — without any additional CRM infrastructure.
+Key design decision: CRM logging happens after the WhatsApp send, not in parallel.
+This ensures a record is only created for conversations where a reply was successfully
+delivered — avoiding phantom leads from failed executions.
+
+Agentic vs. Pipeline Design
+This workflow represents a different architectural paradigm from the PR monitoring
+pipeline:
+Dimension: PR Monitoring 
+WhatsApp Agent TriggerScheduled (hourly)
+Event-driven (webhook)StateStatelessStateful (per-user memory)AI role ClassifierOrchestrator + tool caller 
+OutputFixed formatDynamic, context-dependentHuman interventionOnly on high riskNever (fully autonomous)Execution frequency24×/dayEvery inbound message
+
+Key Takeaways
+
+Phone number as session key is the correct memory design for WhatsApp agents.
+It isolates each user's conversation context without requiring authentication or
+user registration.
+Intent normalization before tool-calling eliminates the most common failure
+mode in conversational agents: ambiguous inputs producing bad tool queries.
+Always normalize to a controlled vocabulary before hitting external data sources.
+Google Sheets as a live knowledge base tool gives clients direct control over
+content without workflow access. Separating content from logic is good practice
+for any production deployment where the client needs to update information
+independently.
+Fallback behavior for tool failures is non-negotiable in customer-facing agents.
+Silent failures (empty responses, error messages) destroy trust. Always define what
+the agent does when a tool returns nothing.
+CRM logging after send (not in parallel) ensures lead records only exist for
+successfully completed interactions — keeping data quality high without additional
+deduplication logic.
