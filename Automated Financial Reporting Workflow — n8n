@@ -1,0 +1,173 @@
+Automated Financial Reporting Workflow — n8n
+Builder: Rodrigo Espinosa Quinteros
+Type: n8n Automation Workflow
+Status: Built and tested (inactive — configurable per client)
+Trigger: Monthly scheduled (1st of month, 8:00 AM Guatemala) + Manual
+Domain: Financial Reporting, Business Intelligence, SME Operations
+
+Overview
+A monthly financial reporting pipeline that reads transaction data from Google Sheets,
+calculates core business KPIs in JavaScript, passes the structured data to an AI
+financial analyst (GPT-5), and delivers a formatted report simultaneously via email
+and Telegram — all without human intervention.
+The workflow replaces a manual monthly reporting process. A business owner no longer
+needs to open a spreadsheet, calculate margins, and write an interpretation. On the
+first of every month at 8:00 AM, a fully analyzed financial report arrives in their
+inbox and phone.
+Key design philosophy: Separate computation from interpretation. JavaScript handles
+the numbers with precision; the AI handles the narrative with context. Neither does
+the other's job.
+
+Flow Architecture
+[Monthly Cron - 1st, 8:00 AM Guatemala]──┐
+[Manual Trigger] ────────────────────────┤
+                                          ↓
+                               [Merge Triggers]
+                                          ↓
+                    [Google Sheets - Read Transactions]
+                                          ↓
+                       [Code - KPI Calculator (JS)]
+                                          ↓
+                    [AI Agent - GPT-5 Financial Analyst]
+                                          ↓
+                    [Code1 - HTML Email Formatter (JS)]
+                         ↓                        ↓
+              [Outlook - Send Report]    [Telegram - Send Report]
+Total nodes: 10
+Trigger types: Monthly cron + Manual fallback
+Integrations: Google Sheets, OpenAI GPT-5, Microsoft Outlook, Telegram
+Active: Inactive (template — activated per client deployment)
+
+Node Breakdown
+1 & 2. Dual Triggers + Merge
+A monthly cron trigger fires on the 1st of each month at 8:00 AM Guatemala time.
+A manual trigger runs in parallel for testing and on-demand execution. Both feed
+into a Merge node that normalizes the trigger source — downstream nodes don't need
+to know which trigger fired.
+
+3. Google Sheets — Read Transactions
+Reads the full transactions sheet with UNFORMATTED_VALUE for numbers (preventing
+locale-formatted strings like "1,234.56" from breaking numeric calculations) and
+FORMATTED_STRING for dates (preserving human-readable date context). This output
+formatting configuration is critical for downstream JavaScript accuracy.
+
+4. Code — KPI Calculator (JavaScript)
+The computational core of the workflow. A custom JavaScript function that:
+
+Reads all transaction rows from the Google Sheets node
+Classifies each row by account_type and category into three buckets:
+
+Income → accumulated as ventas
+COGS → accumulated as cogs (matches multiple category naming conventions)
+Expense → accumulated as gastosOp, also tracked by category
+
+
+Calculates six financial KPIs:
+
+javascriptmargen_bruto_pct  = ((ventas - cogs) / ventas) * 100
+utilidad_neta     = ventas - cogs - gastosOp
+margen_neto_pct   = (utilidad_neta / ventas) * 100
+
+Generates a top_3_gastos array — the three expense categories with highest
+spend, sorted descending
+Returns a single normalized JSON object for the AI agent
+
+Key design decisions:
+
+toNum helper with regex sanitization — strips any currency symbols, spaces,
+or formatting characters from numeric fields before calculation. Handles messy
+real-world spreadsheet data where amounts may be stored as "Q 1,234" or "1234.00"
+Multi-label COGS detection — matches account_type === 'cogs',
+category === 'cogs', category === 'costo de venta', and category === 'costo'.
+Real client data rarely uses perfectly consistent category naming
+executeOnce: true — the node processes all rows in a single execution rather
+than row-by-row, which is required for aggregation calculations
+Rounding before output — all GTQ amounts are rounded to integers, percentages
+to 2 decimal places, before passing to the AI. This prevents the AI from receiving
+floating point noise like 45231.999999997
+
+
+5. AI Agent — GPT-5 Financial Analyst
+Receives the structured KPI object and generates a financial analysis following a
+strict JSON output contract. The agent operates with two prompt layers:
+System message (analyst persona + output schema):
+Defines the agent as a financial analyst for Guatemalan SMEs (GTQ currency, 12% VAT
+context), provides the exact JSON schema it must return, and includes internal
+evaluation criteria hidden from the output:
+
+Gross margin: 30–45% healthy, <25% alert, >50% atypical
+Net margin: 8–20% healthy, <5% alert
+COGS high → gross margin impact; OPEX high → net margin impact
+
+User message (data injection):
+Passes the exact calculated values from the Code node using n8n expressions,
+with an explicit instruction to use these exact numbers — not zeros, not
+approximations. This prevents a common failure mode where the AI ignores provided
+data and generates plausible-sounding but fabricated numbers.
+Required JSON output:
+json{
+  "resumen_kpis": { ...exact numbers... },
+  "headline": "one-line diagnosis",
+  "insights": ["max 2 points"],
+  "acciones_sugeridas": ["max 2 concrete actions"]
+}
+Model choice: GPT-5 — the financial interpretation task benefits from the
+strongest available model. Unlike the WhatsApp agent (which uses GPT-4.1-mini for
+cost efficiency at high frequency), this workflow runs once per month and produces
+a high-stakes business deliverable. Model quality justifies the cost.
+
+6. Code1 — HTML Email Formatter (JavaScript)
+Parses the AI agent's JSON output and renders it as a formatted HTML email body
+with a plain-text fallback. Handles:
+
+JSON extraction from raw agent output (finds the first { and last } to handle
+any preamble the agent might add despite instructions)
+Guatemalan locale number formatting (Q1,234 format)
+Percentage formatting to 2 decimal places
+HTML table for KPIs, bullet lists for insights and actions
+Auto-generated subject line with current date: Reporte financiero – 2025-10-01
+
+
+7. Dual Output — Outlook + Telegram (Parallel)
+Both delivery nodes receive the same formatted output simultaneously:
+
+Microsoft Outlook — sends the full HTML report to the client's email
+Telegram — sends the plain-text version as a push notification
+
+Why both? Email is the formal record; Telegram is the immediate alert. The client
+gets the full formatted report in their inbox and a push notification on their phone
+at the same moment — no need to check email to know the report arrived.
+
+Two-Stage AI Pipeline Design
+This workflow demonstrates a pattern worth highlighting explicitly:
+StageNodeResponsibilityStage 1JavaScript (Code)Precise numerical computation — KPIs, aggregations, top-NStage 2AI Agent (GPT-5)Contextual interpretation — diagnosis, insights, actions
+Why not let the AI calculate the KPIs?
+AI models are unreliable at arithmetic on real data. Passing raw transaction rows
+to an LLM and asking it to calculate gross margin introduces precision errors and
+hallucination risk. JavaScript calculates with deterministic accuracy; the AI
+receives pre-calculated numbers and focuses exclusively on interpretation.
+Why not skip the AI and just send the numbers?
+Raw KPI tables require financial literacy to interpret. The AI converts numbers into
+actionable language — a headline diagnosis, two insights, two concrete actions — that
+a non-financial business owner can act on immediately.
+
+Key Takeaways
+
+Separate computation from interpretation — JavaScript for numbers, AI for
+narrative. Never ask an LLM to do arithmetic on real data; never ask a code node
+to write business prose.
+Strict JSON contracts between nodes — defining the exact schema the AI must
+return (in the system prompt) and injecting exact values (in the user message)
+produces reliable, parseable outputs. Vague prompts produce inconsistent structures
+that break downstream formatting nodes.
+UNFORMATTED_VALUE for Google Sheets numeric reads is non-negotiable for
+calculation workflows. Locale-formatted numbers break JavaScript arithmetic silently.
+Multi-label category matching handles the reality that client data is never
+perfectly consistent. Always match multiple naming conventions for critical
+classifications like COGS.
+Dual delivery (email + Telegram) serves different consumption patterns:
+email for the formal record and detailed review, Telegram for immediate awareness.
+Both add value; neither is redundant.
+Model selection by task frequency and stakes — GPT-5 for a monthly
+high-stakes deliverable; GPT-4.1-mini for a high-frequency conversational agent.
+Match model cost to execution frequency and output importance.
