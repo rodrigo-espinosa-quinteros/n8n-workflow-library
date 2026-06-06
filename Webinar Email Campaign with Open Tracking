@@ -1,0 +1,157 @@
+Webinar Email Campaign with Open Tracking — n8n Workflow
+Builder: Rodrigo Espinosa Quinteros
+Type: n8n Automation Workflow
+Status: Active — executed for live webinar campaign (October 2025)
+Trigger: Scheduled one-time (October 6, 8:00 AM) + Manual trigger
+Domain: Email Marketing, Lead Nurturing, Campaign Analytics
+
+Overview
+A targeted email campaign workflow that sends a personalized webinar invitation to
+every contact in a master database who has not yet registered — then tracks exactly
+who opens each email, logging the recipient address and open timestamp back to Google
+Sheets via an embedded tracking pixel.
+No external email marketing platform required. The entire pipeline — deduplication,
+batched sending, rate limiting, and open tracking analytics — runs inside n8n using
+Google Sheets, Microsoft Outlook, and a self-hosted webhook.
+
+Flow Architecture
+[Schedule Trigger - Oct 6, 8:00 AM] ──┐
+[Manual Trigger] ──────────────────────┤
+                                       ↓
+              ┌── [BDCompleta - Full contact database]
+              └── [Registrados - Already registered list]
+                                       ↓
+                    [la magia - JS Deduplication Filter]
+                                       ↓
+                    [Loop Over Items - Batches of 40]
+                          ↓                    ↓
+              [Send Outlook Email]        [Wait 90 seconds]
+                                               ↓
+                                     [Loop back for next batch]
+
+─── Parallel tracking pipeline ───────────────────────────────
+[Webhook - pixel fires on email open]
+              ↓
+[apertura - Log email + date + time to Google Sheets]
+Total nodes: 10
+Trigger types: Scheduled (one-time cron) + Manual fallback
+Integrations: Google Sheets (×3), Microsoft Outlook, n8n Webhook
+Active: Yes
+
+Node Breakdown
+1. Schedule Trigger (One-Time Cron)
+Fires once at 8:00 AM on October 6 using a specific cron expression
+(0 0 8 6 10 *). This is a one-time scheduled execution — not a recurring job.
+Useful for campaigns tied to a specific date where manual execution would be risky.
+A manual trigger node runs in parallel, allowing the workflow to be tested or
+re-executed without waiting for the scheduled time.
+
+2. BDCompleta + Registrados (Parallel Sheet Reads)
+Both Google Sheets are read simultaneously as soon as the trigger fires:
+
+BDCompleta: Full master contact database
+Registrados: List of contacts who already registered for the webinar
+
+Both outputs feed into the deduplication node. Reading them in parallel reduces
+total execution time compared to sequential reads.
+
+3. "la magia" — JavaScript Deduplication Filter
+The core logic node. A custom JavaScript function that:
+
+Builds a Set of email addresses from the registered list
+Iterates through every row in the full database
+Skips any row where:
+
+The email field is empty
+The value is not a valid email format (regex validation)
+The email already exists in the registered set
+The email has already been seen in the current pass (deduplication within the DB)
+
+
+Returns only clean, unregistered, unique email addresses
+
+javascriptconst regSet = new Set(
+  regs.map(i => clean(i.json['Correo'])).filter(Boolean)
+);
+// Skips registered, invalid, empty, and duplicate emails
+Key design decisions:
+
+Unicode normalization (\u00A0 non-breaking space removal) — handles
+copy-paste artifacts common in spreadsheet data that would otherwise cause
+false email mismatches
+Case-insensitive comparison — toLowerCase() on all emails prevents
+User@email.com and user@email.com from being treated as different addresses
+Regex email validation — filters out malformed entries before they reach
+the send step, preventing Outlook errors and bounce risk
+In-loop deduplication — a secondary seen Set catches duplicates within the
+master database itself, not just against the registered list
+
+
+4. Loop Over Items (Batch Processing — 40 per batch)
+Splits the filtered contact list into batches of 40 and processes them sequentially,
+looping back after each batch completes.
+Why batching? Microsoft Outlook's API has rate limits on bulk sending. Sending
+all emails simultaneously would trigger throttling or rejections. Batches of 40
+with a 90-second wait between each batch keeps the send rate well within limits.
+
+5. Send Outlook Email
+Sends a personalized HTML email to each contact via Microsoft Outlook OAuth. The
+email:
+
+Uses the contact's name dynamically from the sheet data
+Contains full HTML formatting with a clear call-to-action
+Has retryOnFail: true with a 5-second wait between retries — ensuring temporary
+Outlook API errors don't silently drop emails
+Uses onError: continueRegularOutput — a single failed send doesn't abort the
+entire batch
+
+Embedded tracking pixel:
+html<img src="https://[n8n-instance]/webhook/[id]?email={{ $json.CorreoEnvio }}"
+     width="1" height="1" style="display:none;" />
+A 1×1 invisible image is embedded in every email. When the recipient opens the email,
+their email client loads the image — firing the webhook with their email address as
+a query parameter. This is standard email open tracking, implemented entirely within
+n8n without any external analytics service.
+
+6. Wait (90 seconds)
+Pauses execution for 90 seconds between batches. Works in conjunction with the Loop
+node to create a controlled send rate of ~40 emails per 90 seconds — well within
+Outlook's rate limits.
+
+7. Webhook + Apertura (Open Tracking Pipeline)
+A parallel, always-on pipeline that runs independently of the send flow:
+
+Webhook node listens at a fixed URL path for incoming pixel fire requests
+Extracts the email query parameter from the request
+Apertura node appends a row to a dedicated Google Sheet with:
+
+Recipient email address
+Date of open (yyyy-MM-dd)
+Time of open (HH:mm:ss)
+
+
+
+This creates a real-time open tracking log that the client can use to identify
+engaged contacts for follow-up prioritization — functionally equivalent to what
+dedicated email platforms like Mailchimp or ActiveCampaign provide, built entirely
+in n8n.
+
+Key Takeaways
+
+Deduplication before send is non-negotiable for any email campaign workflow.
+Sending to already-registered contacts damages trust and wastes quota. A JavaScript
+Set-based filter is fast, reliable, and handles edge cases (unicode, case, invalid
+formats) that simple string matching misses.
+Batch + wait pattern is the correct approach for bulk email via API. Never send
+all items simultaneously — always respect the target API's rate limits with batching
+and deliberate pauses.
+Self-hosted open tracking via pixel + webhook replicates a core email marketing
+platform feature inside n8n at zero additional cost. Any workflow that sends emails
+can be extended with this pattern to capture engagement data without a third-party
+ESP.
+Dual triggers (scheduled + manual) is good practice for any one-time campaign
+workflow. The manual trigger allows safe testing and emergency re-execution without
+modifying the schedule.
+retryOnFail + continueRegularOutput on the send node is essential for
+production email workflows. Individual send failures should never abort the entire
+campaign — log them, continue, and review the failure log afterward.
